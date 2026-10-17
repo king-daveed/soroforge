@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/soroworks/soroforge/internal/stellar"
 	"github.com/soroworks/soroforge/internal/store"
@@ -12,10 +13,12 @@ import (
 
 // UpgradeRequest asks for a tracked contract's bytecode to be replaced.
 type UpgradeRequest struct {
-	Alias   string `json:"alias"`
-	Network string `json:"network,omitempty"`
-	Notes   string `json:"notes,omitempty"`
-	DryRun  bool   `json:"dry_run,omitempty"`
+	Alias     string `json:"alias"`
+	Network   string `json:"network,omitempty"`
+	Notes     string `json:"notes,omitempty"`
+	DryRun    bool   `json:"dry_run,omitempty"`
+	GitCommit string `json:"git_commit,omitempty"`
+	WasmHash  string `json:"wasm_hash,omitempty"`
 }
 
 // UpgradeResult describes a completed or simulated upgrade.
@@ -55,6 +58,48 @@ type UpgradeResult struct {
 	// network's sorovault_url. Absent on a dry run, on a no-change upgrade,
 	// or when no registry is configured.
 	Catalog *CatalogStatus `json:"catalog,omitempty"`
+}
+
+func (s *Service) resolveUpgradeHash(ctx context.Context, r resolved, input string) (xdr.Hash, string, error) {
+	input = strings.TrimSpace(strings.ToLower(input))
+	if len(input) == 64 {
+		h, err := stellar.ParseHashHex(input)
+		if err != nil {
+			return h, "", err
+		}
+		return h, input, nil
+	}
+
+	history, err := s.store.History(ctx, r.NetworkName, r.Alias)
+	if err != nil {
+		return xdr.Hash{}, "", fmt.Errorf("lookup history for %s/%s: %w", r.NetworkName, r.Alias, err)
+	}
+
+	seen := make(map[string]struct{})
+	var matches []string
+	for _, d := range history {
+		h := strings.ToLower(d.WasmHash)
+		if strings.HasPrefix(h, input) {
+			if _, ok := seen[h]; !ok {
+				seen[h] = struct{}{}
+				matches = append(matches, h)
+			}
+		}
+	}
+
+	if len(matches) == 0 {
+		return xdr.Hash{}, "", fmt.Errorf("no wasm hash starting with %q found in history for %s on %s", input, r.Alias, r.NetworkName)
+	}
+	if len(matches) > 1 {
+		return xdr.Hash{}, "", fmt.Errorf("ambiguous wasm hash prefix %q for %s on %s (matches: %s)", input, r.Alias, r.NetworkName, strings.Join(matches, ", "))
+	}
+
+	target := matches[0]
+	h, err := stellar.ParseHashHex(target)
+	if err != nil {
+		return h, "", err
+	}
+	return h, target, nil
 }
 
 // Upgrade replaces a tracked contract's bytecode, keeping its address.
@@ -100,12 +145,35 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		return nil, fmt.Errorf("cannot upgrade %s: Stellar Asset Contracts cannot be upgraded", r.Alias)
 	}
 
-	wasm, err := s.readWasm(r.Contract)
-	if err != nil {
-		return nil, err
+	var (
+		wasmHash    xdr.Hash
+		wasmHashHex string
+		wasm        []byte
+	)
+
+	if req.WasmHash != "" {
+		targetHash, targetHex, err := s.resolveUpgradeHash(ctx, r, req.WasmHash)
+		if err != nil {
+			return nil, err
+		}
+		wasmHash = targetHash
+		wasmHashHex = targetHex
+
+		uploaded, err := stellar.WasmUploaded(ctx, r.Client, wasmHash)
+		if err != nil {
+			return nil, fmt.Errorf("check whether wasm hash is on-chain: %w", err)
+		}
+		if !uploaded {
+			return nil, fmt.Errorf("wasm hash %s does not exist on-chain on %s", wasmHashHex, r.NetworkName)
+		}
+	} else {
+		wasm, err = s.readWasm(r.Contract)
+		if err != nil {
+			return nil, err
+		}
+		wasmHash = stellar.WasmHash(wasm)
+		wasmHashHex = stellar.HashHex(wasmHash)
 	}
-	wasmHash := stellar.WasmHash(wasm)
-	wasmHashHex := stellar.HashHex(wasmHash)
 
 	upgradeFunc := r.Contract.UpgradeFuncOrDefault()
 
@@ -148,15 +216,19 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 	}
 
 	// Step 1: make the new bytecode available on-chain.
-	upload, skipped, err := s.uploadBytecode(ctx, r, signer, wasm, req.DryRun, log)
-	if err != nil {
-		return nil, err
-	}
-	if skipped {
+	if req.WasmHash != "" {
 		result.UploadSkipped = true
 	} else {
-		result.UploadTxHash = upload.Hash
-		result.UploadEnvelopeXDR = upload.EnvelopeXDR
+		upload, skipped, err := s.uploadBytecode(ctx, r, signer, wasm, req.DryRun, log)
+		if err != nil {
+			return nil, err
+		}
+		if skipped {
+			result.UploadSkipped = true
+		} else {
+			result.UploadTxHash = upload.Hash
+			result.UploadEnvelopeXDR = upload.EnvelopeXDR
+		}
 	}
 
 	// Step 2: ask the contract to upgrade itself.
@@ -195,6 +267,8 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		"to_wasm_hash", wasmHashHex,
 		"tx_hash", upgrade.Hash)
 
+	gitCommit, dirty := gitMetadata(s.cfg.Dir(), req.GitCommit)
+
 	deployment, err := s.record(ctx, store.Deployment{
 		Alias:          r.Alias,
 		Network:        r.NetworkName,
@@ -205,6 +279,10 @@ func (s *Service) Upgrade(ctx context.Context, req UpgradeRequest) (*UpgradeResu
 		TxHash:         upgrade.Hash,
 		Ledger:         upgrade.Ledger,
 		Notes:          req.Notes,
+		GitCommit:      gitCommit,
+		Dirty:          dirty,
+		FeeCharged:     upgrade.FeeCharged,
+		CIRunURL:       ciRunURL(),
 	})
 	if err != nil {
 		return nil, err

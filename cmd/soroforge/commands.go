@@ -25,8 +25,9 @@ var version = "dev"
 
 func newDeployCmd() *cobra.Command {
 	var (
-		dryRun bool
-		notes  string
+		dryRun    bool
+		notes     string
+		gitCommit string
 	)
 
 	cmd := &cobra.Command{
@@ -55,10 +56,11 @@ assembled envelopes, and writes nothing to the database.`,
 			defer a.Close()
 
 			result, err := a.service.Deploy(cmd.Context(), deploy.DeployRequest{
-				Alias:   args[0],
-				Network: flags.network,
-				Notes:   notes,
-				DryRun:  dryRun,
+				Alias:     args[0],
+				Network:   flags.network,
+				Notes:     notes,
+				DryRun:    dryRun,
+				GitCommit: gitCommit,
 			})
 			if err != nil {
 				return err
@@ -71,14 +73,17 @@ assembled envelopes, and writes nothing to the database.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this deployment (e.g. a ticket or release tag)")
+	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 
 	return cmd
 }
 
 func newUpgradeCmd() *cobra.Command {
 	var (
-		dryRun bool
-		notes  string
+		dryRun    bool
+		notes     string
+		gitCommit string
+		wasmHash  string
 	)
 
 	cmd := &cobra.Command{
@@ -103,10 +108,12 @@ upgrade applied outside SoroForge is still reported accurately.`,
 			defer a.Close()
 
 			result, err := a.service.Upgrade(cmd.Context(), deploy.UpgradeRequest{
-				Alias:   args[0],
-				Network: flags.network,
-				Notes:   notes,
-				DryRun:  dryRun,
+				Alias:     args[0],
+				Network:   flags.network,
+				Notes:     notes,
+				DryRun:    dryRun,
+				GitCommit: gitCommit,
+				WasmHash:  wasmHash,
 			})
 			if err != nil {
 				return err
@@ -119,6 +126,8 @@ upgrade applied outside SoroForge is still reported accurately.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this upgrade")
+	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
+	cmd.Flags().StringVar(&wasmHash, "wasm-hash", "", "upgrade to an existing on-chain WASM hash instead of local file")
 
 	return cmd
 }
@@ -175,6 +184,67 @@ anything.`,
 		"assemble and simulate without submitting or recording anything")
 	cmd.Flags().StringVar(&notes, "notes", "",
 		"free-form note recorded with this upload (e.g. a ticket or release tag)")
+
+	return cmd
+}
+
+func newInvokeCmd() *cobra.Command {
+	var (
+		dryRun    bool
+		notes     string
+		gitCommit string
+	)
+
+	cmd := &cobra.Command{
+		Use:   "invoke <alias> <fn> [args...]",
+		Short: "Invoke a function on a tracked contract",
+		Long: `Call a function on a tracked contract using the deployer key.
+
+The call is simulated, signed, submitted, and recorded in the deployment history
+with the function name and arguments.
+
+Arguments use the typed syntax:
+  soroforge invoke counter increment
+  soroforge invoke counter add u32:5
+  soroforge invoke token transfer address:GB... u64:1000
+
+Use --dry-run to simulate without submitting or recording anything.`,
+		Args: cobra.MinimumNArgs(2),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			a, err := newApp(cmd.Context(), appOptions{
+				requireSigner: true,
+				storeOptional: dryRun,
+			})
+			if err != nil {
+				return err
+			}
+			defer a.Close()
+
+			alias := args[0]
+			fn := args[1]
+			callArgs := args[2:]
+
+			result, err := a.service.Invoke(cmd.Context(), deploy.InvokeRequest{
+				Alias:     alias,
+				Network:   flags.network,
+				Function:  fn,
+				Args:      callArgs,
+				Notes:     notes,
+				DryRun:    dryRun,
+				GitCommit: gitCommit,
+			})
+			if err != nil {
+				return err
+			}
+			return printInvokeResult(result)
+		},
+	}
+
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false,
+		"assemble and simulate without submitting or recording anything")
+	cmd.Flags().StringVar(&notes, "notes", "",
+		"free-form note recorded with this invocation")
+	cmd.Flags().StringVar(&gitCommit, "git-commit", "", "override the detected source commit")
 
 	return cmd
 }

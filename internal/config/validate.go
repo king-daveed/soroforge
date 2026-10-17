@@ -129,11 +129,28 @@ func validateContract(alias string, c Contract) []string {
 		if c.Salt != "" {
 			problems = append(problems, prefix+": Stellar Asset Contracts derive their ID from the asset; salt cannot be used")
 		}
+		if strings.TrimSpace(c.InitFunc) != "" || len(c.InitArgs) > 0 {
+			problems = append(problems, prefix+": Stellar Asset Contracts are not initialized; init_fn and init_args cannot be used")
+		}
 	case hasWasm:
 		for i, arg := range c.ConstructorArgs {
 			if _, err := arg.ToScVal(); err != nil {
 				problems = append(problems, fmt.Sprintf("%s.constructor_args[%d]: %v", prefix, i, err))
 			}
+		}
+
+		if strings.TrimSpace(c.InitFunc) != "" && len(c.ConstructorArgs) > 0 {
+			problems = append(problems, fmt.Sprintf("%s: cannot configure both constructor_args and init_fn", prefix))
+		}
+
+		for i, arg := range c.InitArgs {
+			if _, err := arg.ToScVal(); err != nil {
+				problems = append(problems, fmt.Sprintf("%s.init_args[%d]: %v", prefix, i, err))
+			}
+		}
+
+		if len(c.InitArgs) > 0 && strings.TrimSpace(c.InitFunc) == "" {
+			problems = append(problems, prefix+".init_args: init_fn must be set when init_args are configured")
 		}
 
 		if c.Salt != "" {
