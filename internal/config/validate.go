@@ -6,6 +6,8 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+
+	"github.com/stellar/go-stellar-sdk/txnbuild"
 )
 
 // SupportedVersion is the only soroforge.yaml schema version understood today.
@@ -109,23 +111,48 @@ func validateContract(alias string, c Contract) []string {
 		return []string{"contracts: contract aliases must not be empty"}
 	}
 
-	if strings.TrimSpace(c.Wasm) == "" {
+	hasWasm := strings.TrimSpace(c.Wasm) != ""
+	hasAsset := strings.TrimSpace(c.Asset) != ""
+
+	switch {
+	case !hasWasm && !hasAsset:
 		problems = append(problems, prefix+".wasm: must be set")
-	}
-
-	for i, arg := range c.ConstructorArgs {
-		if _, err := arg.ToScVal(); err != nil {
-			problems = append(problems, fmt.Sprintf("%s.constructor_args[%d]: %v", prefix, i, err))
+	case hasWasm && hasAsset:
+		problems = append(problems, prefix+": wasm and asset are mutually exclusive")
+	case hasAsset:
+		if err := validateAsset(c.Asset); err != nil {
+			problems = append(problems, fmt.Sprintf("%s.asset: %v", prefix, err))
 		}
-	}
+		if len(c.ConstructorArgs) > 0 {
+			problems = append(problems, prefix+": Stellar Asset Contracts do not take constructor args")
+		}
+		if c.Salt != "" {
+			problems = append(problems, prefix+": Stellar Asset Contracts derive their ID from the asset; salt cannot be used")
+		}
+	case hasWasm:
+		for i, arg := range c.ConstructorArgs {
+			if _, err := arg.ToScVal(); err != nil {
+				problems = append(problems, fmt.Sprintf("%s.constructor_args[%d]: %v", prefix, i, err))
+			}
+		}
 
-	if c.Salt != "" {
-		if _, err := ParseSalt(c.Salt); err != nil {
-			problems = append(problems, fmt.Sprintf("%s.salt: %v", prefix, err))
+		if c.Salt != "" {
+			if _, err := ParseSalt(c.Salt); err != nil {
+				problems = append(problems, fmt.Sprintf("%s.salt: %v", prefix, err))
+			}
 		}
 	}
 
 	return problems
+}
+
+func validateAsset(s string) error {
+	trimmed := strings.TrimSpace(s)
+	if trimmed == "" {
+		return errors.New("must not be empty")
+	}
+	_, err := txnbuild.ParseAssetString(trimmed)
+	return err
 }
 
 func sortedKeys[V any](m map[string]V) []string {

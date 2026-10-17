@@ -133,3 +133,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Build image
         run: docker build -t soroforge:ci .
+
+  helm:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install Helm
+        uses: azure/setup-helm@b7246b12e77f0c801b62971f257a448777087595 # v4.3.0
+      - name: Helm lint
+        run: helm lint deploy/helm/soroforge
+      - name: Helm template
+        run: helm template soroforge deploy/helm/soroforge
